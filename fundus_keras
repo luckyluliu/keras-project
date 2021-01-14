@@ -1,0 +1,217 @@
+import os
+import keras
+import fire
+from math import ceil
+import numpy as np
+import pandas as pd
+from pathlib import Path
+import skimage
+import skimage.io
+import cv2
+from datas import FundusSequence
+from keras.layers import Dense
+from keras.models import load_model
+from keras.applications.inception_v3 import InceptionV3
+from keras.applications.resnet50 import ResNet50
+import warnings
+warnings.filterwarnings("ignore")
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"  # 设置GPU
+from keras.utils import multi_gpu_model
+
+
+class FundusKeras():
+    def __init__(self, batch_size=16, img_size=512, num_classes=5, input_channels=7):
+        self._batch_size = batch_size
+        self._img_size = img_size
+        self._num_classes = num_classes
+        self._input_channels = input_channels
+    
+    def merge_lesion(self, dfpath, datadir, savedir):
+        df = pd.read_csv(dfpath)
+        paths = list(df['imagepath'])
+        for filepath in paths:
+            path = Path(filepath)
+            anatomyPath = Path(datadir) / 'anatomy' / path.with_suffix('.png')
+            lesion1Path = Path(datadir) / 'lesion1' / path.with_suffix('.png')
+            lesion2Path = Path(datadir) / 'lesion2' / path.with_suffix('.png')
+            savePath = Path(savedir) / path.with_suffix('.npy')
+            try:
+                anatomy = skimage.io.imread(anatomyPath)
+                assert anatomy.ndim == 2, 'anatomy必须单通道'
+                lesion1 = skimage.io.imread(lesion1Path)
+                assert lesion1.ndim == 2, 'lesion1必须单通道'
+                lesion2 = skimage.io.imread(lesion2Path)
+                assert lesion2.ndim == 3 and lesion2.shape[2] == 3, 'lesion2为3通道'
+
+                anatomy = cv2.resize(anatomy, (512,512))
+                lesion1 = cv2.resize(lesion1, (512,512))
+                lesion2 = cv2.resize(lesion2, (512,512))
+
+                # merged lesion
+                h,w = anatomy.shape
+                lesion = np.zeros((h,w,8), dtype=np.uint8)
+
+                lesion[:,:,0] = np.where(anatomy==1, 255, 0)
+                lesion[:,:,1] = np.where(anatomy==2, 255, 0)
+                lesion[:,:,2] = np.where(anatomy==3, 255, 0)
+                lesion[:,:,3] = np.where(anatomy==4, 255, 0)
+
+                lesion[:,:,4] = np.where(lesion1==1, 255, 0)
+                #lesion[:,:,5] = np.where(lesion1==2, 255, 0)
+
+                lesion[:,:,5] = np.where(lesion2[...,2]>180, 255, 0)
+                lesion[:,:,6] = np.where(lesion2[...,1]>100, 255, 0)
+                lesion[:,:,7] = np.where(lesion2[...,0]>100, 255, 0)
+                np.save(str(savePath), lesion)
+            except Exception as e:
+                print(filepath, e)
+                continue
+    
+    def merge_lesion1(self, dfpath, vesseldir, cupdiskdir, lesiondir, savedir):
+        df = pd.read_csv(dfpath)
+        paths = list(df['imagepath'])
+        for filepath in paths:
+            path = Path(filepath)
+            vesselPath = Path(vesseldir) / path.with_suffix('.npy')
+            cupdiskPath = Path(cupdiskdir) / path.with_suffix('.npy')
+            lesionPath = Path(lesiondir) / path.with_suffix('.npy')
+            savePath = Path(savedir) / path.with_suffix('.npy')
+            try:
+                lesion = np.load(str(lesionPath))
+                cupdisk = np.load(str(cupdiskPath))
+                vessel = np.load(str(vesselPath))
+                cupdisk = np.argmax(cupdisk, axis=2)
+                lesion[:,:,0] = np.where(cupdisk==2, 255,0)#视杯
+                lesion[:,:,1] = np.where(cupdisk==1, 255,0)#视盘      
+                
+                lesion[:,:,3] = np.where(vessel>0.4, 255, 0)
+                
+            except Exception as e:
+                print(filepath, e)
+                continue    
+
+    def merge_lesion2(self, dfpath, vesseldir, cupdiskdir, irhdir, cwdir, exdir, anatomydir, lesion1dir, savedir):
+        df = pd.read_csv(dfpath)
+        paths = list(df['imagepath'])
+        for filepath in paths:
+            path = Path(filepath)
+            vesselPath = Path(vesseldir) / path.with_suffix('.npy')
+            cupdiskPath = Path(cupdiskdir) / path.with_suffix('.npy')
+            irhPath = Path(irhdir) / path.with_suffix('.npy')
+            cwPath = Path(cwdir) / path.with_suffix('.npy')
+            exPath = Path(exdir) / path.with_suffix('.npy')
+            anatomyPath = Path(anatomydir) / path.with_suffix('.png')
+            lesion1Path = Path(lesion1dir) / path.with_suffix('.png')
+            savePath = Path(savedir) / path.with_suffix('.npy')
+            try:
+                anatomy = skimage.io.imread(anatomyPath)
+                assert anatomy.ndim == 2, 'anatomy必须单通道'
+                lesion1 = skimage.io.imread(lesion1Path)
+                assert lesion1.ndim == 2, 'lesion1必须单通道'
+                anatomy = cv2.resize(anatomy, (512,512))
+                lesion1 = cv2.resize(lesion1, (512,512))
+                
+                ex = np.load(str(exPath))*255
+                cw = np.load(str(cwPath))*255
+                irh = np.load(str(irhPath))*255
+                cupdisk = np.load(str(cupdiskPath))
+                vessel = np.load(str(vesselPath))
+                cupdisk = np.argmax(cupdisk, axis=2)
+                lesion = np.zeros((512,512,8), dtype=np.uint8)
+                lesion[:,:,0] = np.where(cupdisk==2, 255,0)#视杯
+                lesion[:,:,1] = np.where(cupdisk==1, 255,0)#视盘
+                #lesion[:,:,0] = np.where(anatomy==1, 255, 0)
+                #lesion[:,:,1] = np.where(anatomy==2, 255, 0)
+                lesion[:,:,2] = np.where(anatomy==3, 255, 0)#黄斑
+                lesion[:,:,3] = np.where(vessel[...,0]>0.4, 255, 0)#血管
+                lesion[:,:,4] = np.where(lesion1==1, 255, 0)#脉络膜新生血管
+                lesion[:,:,5] = np.where(irh[...,0]>180, 255, 0)#出血
+                lesion[:,:,6] = np.where(ex[...,0]>100, 255, 0)#渗出
+                lesion[:,:,7] = np.where(cw[...,0]>100, 255, 0)#棉花絮斑
+                np.save(str(savePath), lesion)
+            except Exception as e:
+                print(filepath, e)
+                continue
+
+    def train(self, dfpath, data_dir, savemodel_path, weights=False, pretrained_weights_path=None, datatype='png', log_path='fundus_clf.log'):
+        df = pd.read_csv(dfpath)
+        train_df = df[df['dataset']=='train'].reset_index(drop=True)
+        val_df = df[df['dataset']=='valid'].reset_index(drop=True)
+        train_generator=FundusSequence(train_df, data_dir, self._input_channels, self._batch_size, self._num_classes, augment=True, datatype=datatype)
+        validate_generator=FundusSequence(val_df, data_dir, self._input_channels, self._batch_size, self._num_classes, augment=False, datatype=datatype)
+        
+        # model
+        base_model = InceptionV3(include_top=False, weights=None, input_shape=(self._img_size, self._img_size, self._input_channels),pooling='avg')
+        #base_model = InceptionV3(include_top=False, input_shape=(self._img_size, self._img_size, self._input_channels),pooling='avg')
+        #base_model = ResNet50(include_top=False,input_shape=(h, w, 3),pooling='avg')
+        #predictions = Dense(3, activation='sigmoid')(X)
+        X = base_model.output
+        #base_model = load_model('../../models/fundus_softmax_model2-0.hdf5')
+        #X = base_model.get_layer('global_average_pooling2d_1').output
+        
+        proba = Dense(self._num_classes, activation='sigmoid')(X)
+        model = keras.models.Model(inputs=base_model.input, outputs=proba)
+        #model = multi_gpu_model(model, gpus=3)
+        # compile
+        optimizer = keras.optimizers.Adam(lr=0.0001, beta_1=0.9, beta_2=0.999, epsilon=1e-08, decay=0.0, amsgrad=False)
+        #optimizer = keras.optimizers.Adam(lr=1.5e-4)
+        #binary_crossentropy对应sigmoid,categorical_crossentropy对应softmax
+        model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
+        # callbacks
+        checkpoint = keras.callbacks.ModelCheckpoint(savemodel_path,
+                                                     monitor='val_accuracy', verbose=1, save_best_only=True, mode='max')
+        reducelr = keras.callbacks.ReduceLROnPlateau(monitor='val_accuracy', factor=0.5, patience=5, verbose=1, mode="max", min_lr=0)
+        #reducelr = keras.callbacks.LearningRateScheduler(lr_schedule, verbose=1)
+        earlyStop = keras.callbacks.EarlyStopping(monitor='val_accuracy', min_delta=0.0002, patience=3, verbose=0, mode='auto')
+        csvlogger = keras.callbacks.CSVLogger(log_path)
+
+        callbacks = [
+          checkpoint,
+          reducelr,
+          csvlogger,
+          # earlyStop
+        ]
+        
+        # train
+        #num_train = []
+        #for i in range(self._num_classes):
+        #    df1 = train_df[train_df['label']==i]
+        #    num_train.append(df1.shape[0])
+        #steps_per_epoch=ceil(max(num_train)*self._num_classes/self._batch_size)
+        steps_per_epoch=ceil(train_df.shape[0]/self._batch_size)
+        validation_steps=ceil(val_df.shape[0]/self._batch_size)  
+        clf = model.fit_generator(train_generator, steps_per_epoch=steps_per_epoch, epochs=10,
+                                  validation_data=validate_generator, validation_steps=validation_steps, callbacks=callbacks,
+                                  verbose=1, class_weight='auto', workers=60)
+
+    def evaluate(self, df_path, data_dir, model_path, output_path, datatype='png'):
+        df = pd.read_csv(df_path)
+        data_generator=FundusSequence(df, data_dir, self._input_channels, self._batch_size, self._num_classes,\
+                                        augment=False, datatype=datatype)
+        model = load_model(model_path) 
+        #data_generator.reset()
+        preds = model.predict(data_generator, verbose=1, workers=60)
+        results = []
+        for pred in preds:
+            result = {}
+            for i, p in enumerate(pred):
+                try:
+                    result[f'prob_{i}'] = float(p)
+                except:
+                    result[f'prob_{i}'] = 0
+            result['pred'] = np.argmax(pred)
+            results += [result]
+        df_result = pd.DataFrame(results)
+        df_output = df.merge(df_result,left_index=True,right_index=True)
+        df_output.to_csv(output_path, index=0)
+        
+    def inference(self, img_path, model_path, datatype='png'):
+        img = cv2.imread(img_path)
+        img = cv2.resize(img, (512,512))
+        model = load_model(model_path) 
+        pred = model.predict(img[np.newaxis, ...])
+        #pred = model(img)
+        print(pred)
+
+if __name__ == '__main__':
+    fire.Fire(FundusKeras)
